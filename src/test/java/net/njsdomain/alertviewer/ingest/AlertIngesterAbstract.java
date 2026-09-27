@@ -11,6 +11,7 @@ import net.njsdomain.alertviewer.ingest.alertmananer.AlertIngester;
 import net.njsdomain.alertviewer.ingest.alertmananer.AlertManagerClient;
 import net.njsdomain.alertviewer.ingest.alertmananer.AlertManagerConfigParser;
 import net.njsdomain.alertviewer.ingest.alertmananer.AlertManagerUtil;
+import net.njsdomain.alertviewer.server.OrphanService;
 import net.njsdomain.alertviewer.server.StateBuffer;
 import org.assertj.core.util.Lists;
 import org.json.JSONArray;
@@ -74,6 +75,11 @@ public abstract class AlertIngesterAbstract {
 
     @Mock
     MongoTemplate mongo;
+
+    //unstubbed, so it reports no orphaned alertmanagers: these scenarios are a deployment
+    //whose alerts all belong to a configured alertmanager
+    @Mock
+    OrphanService orphans;
 
     @InjectMocks
     AlertIngester alertIngester;

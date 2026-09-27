@@ -10,6 +10,7 @@ import net.njsdomain.alertviewer.data.AlertManagerEntry;
 import net.njsdomain.alertviewer.data.AlertManagerEntryRepo;
 import net.njsdomain.alertviewer.data.AlertManagerUser;
 import net.njsdomain.alertviewer.data.alert.Alert;
+import net.njsdomain.alertviewer.data.jira.JiraLabels;
 import net.njsdomain.alertviewer.data.jira.WraithGeneric;
 import net.njsdomain.alertviewer.data.jira.WraithTickets;
 import net.njsdomain.alertviewer.data.jira.WraithUrls;
@@ -63,6 +64,9 @@ public class RestEndpoint {
 
     @Autowired
     WraithUrls wraith;
+
+    @Autowired
+    OrphanService orphans;
     @Autowired
     Environment env;
 
@@ -104,9 +108,12 @@ public class RestEndpoint {
             responseHeaders.set("CORTANA-RETENTION", env.getProperty("resolved.remove.minutes", "10080"));
             //base of the jira the tickets land in; the UI appends /browse/<key> to reach one
             responseHeaders.set("CORTANA-JIRA-URL", env.getProperty("jira.base.url", ""));
-            //prefix on the jira label carrying the fingerprint, so the details panel can
-            //show the same label the rebuild searches on
-            responseHeaders.set("CORTANA-JIRA-LABEL-PREFIX", env.getProperty("jira.label.prefix", "alertmanager"));
+            //prefix on the jira label carrying the fingerprint, as jira spells it -- wraith's
+            //own prefix included -- so the details panel can show the label a ticket raised
+            //here really carries. Finding a ticket looks under more prefixes than this, but
+            //only one label is the alert's own
+            responseHeaders.set("CORTANA-JIRA-LABEL-PREFIX",
+                    JiraLabels.createdPrefix(env.getProperty("jira.label.prefix")));
             //jira runs through wraith, so with no wraith url at all there is no jira
             //here and the UI hides the controls rather than offering dead buttons
             responseHeaders.set("CORTANA-JIRA-ENABLED", String.valueOf(wraith.enabled()));
@@ -444,6 +451,12 @@ public class RestEndpoint {
             objectMapper.registerModule(new JavaTimeModule());
             WraithGeneric jira = objectMapper.readValue(payload, WraithGeneric.class);
 
+            //the label to raise the ticket under is configuration, not the caller's to
+            //choose, so keep the fingerprint the UI sent and put the configured prefix on
+            //it. Wraith adds its own prefix in front of this when it labels the ticket
+            String fingerprint = JiraLabels.fingerprintOf(jira.getId());
+            jira.setId(jiraLabelPrefix() + ":" + fingerprint);
+
 
             log.debug("BEFORE:" + jira.toString());
             if (match(jira.getSystem(), "volt")) jira.setEnvironment("HCI VOLT");
@@ -479,6 +492,11 @@ public class RestEndpoint {
                 //wraith only reports tickets it just raised, so this one is open
                 if (!storeJiraKey(jira.getId(), key, "open")) {
                     log.warn("Created jira " + key + " but found no alert for " + jira.getId());
+                } else {
+                    //the note is the only record of when the ticket was raised, and the
+                    //graph reads it: an alert stops counting as wanting attention from
+                    //here, so without it the whole firing window would read as ticketed
+                    addNote(fingerprint, state.getUser(token), "Jira: created " + key);
                 }
                 return new ResponseEntity<>(new ServiceResponse<>("Jira " + key + " created"), HttpStatus.OK);
             } else {
@@ -561,9 +579,9 @@ public class RestEndpoint {
             if (url == null) {
                 return new ResponseEntity<>(new ServiceResponse<>("No wraith.base.url configured"), HttpStatus.SERVICE_UNAVAILABLE);
             }
-            //which prefix the tickets carry depends on what raised them, so it is
-            //configuration rather than a constant
-            String prefix = env.getProperty("jira.label.prefix", "alertmanager");
+            //which prefix a ticket carries depends on what raised it -- this tool's own
+            //creates are only one source -- so every prefix in play gets searched
+            List<String> prefixes = jiraLabelSearchPrefixes();
 
             List<AlertManagerEntry> entries = logRepo.findAll();
             if (entries.isEmpty()) {
@@ -573,10 +591,11 @@ public class RestEndpoint {
             ObjectMapper objectMapper = new ObjectMapper();
             List<String> labels = new ArrayList<>();
             for (AlertManagerEntry le : entries) {
-                labels.add(prefix + ":" + le.getId());
+                labels.addAll(JiraLabels.labelsFor(prefixes, le.getId()));
             }
             String newJson = objectMapper.writeValueAsString(Map.of("labels", labels));
-            log.info("Rebuilding jira links for " + labels.size() + " alerts via " + url + (clear ? ", clearing unmatched" : ""));
+            log.info("Rebuilding jira links for " + entries.size() + " alerts on " + labels.size()
+                    + " labels " + prefixes + " via " + url + (clear ? ", clearing unmatched" : ""));
 
             java.net.http.HttpClient http = java.net.http.HttpClient.newBuilder().sslContext(sslContextFactory.getSSLContext()).build();
             HttpRequest request = HttpRequest.newBuilder()
@@ -597,7 +616,7 @@ public class RestEndpoint {
             int cleared = 0;
             int restatused = 0;
             for (AlertManagerEntry le : entries) {
-                JsonNode ticket = WraithTickets.preferred(found, prefix + ":" + le.getId());
+                JsonNode ticket = WraithTickets.preferred(found, JiraLabels.labelsFor(prefixes, le.getId()));
                 String key = (ticket == null) ? null : WraithTickets.key(ticket);
                 String status = (ticket == null) ? null : WraithTickets.status(ticket);
                 String was = le.getJiraKey();
@@ -630,6 +649,35 @@ public class RestEndpoint {
             String cleanup = clear ? (", " + cleared + " cleared") : "";
             String restated = (restatused > 0) ? (", " + restatused + " status changed") : "";
             return new ResponseEntity<>(new ServiceResponse<>("Jira rebuild: " + linked + " linked" + cleanup + restated + ", of " + entries.size() + " alerts"), HttpStatus.OK);
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+            return new ResponseEntity<>(new ServiceResponse<>(e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Delete every alert left behind by an alertmanager the configuration no longer
+     * names. Admin only, and asked for rather than automatic: see OrphanService.
+     */
+    @DeleteMapping(value = "/orphans")
+    public ResponseEntity<ServiceResponse<Void>> deleteOrphans(@RequestHeader("CORTANA-TOKEN") String token) {
+        try {
+            //one press deletes alerts outright, with no resolved state to recover them from
+            if (!state.isAdmin(token)) {
+                log.info("Unauthorized endpoint access: deleteOrphans");
+                return new ResponseEntity<>(new ServiceResponse<>("Unauthorized, please login"), HttpStatus.UNAUTHORIZED);
+            }
+            //read the names before the delete, so the answer can say what went
+            List<String> alertmanagers = orphans.orphanedAlertmanagers();
+            if (alertmanagers.isEmpty()) {
+                return new ResponseEntity<>(new ServiceResponse<>("No orphaned alerts to delete"), HttpStatus.OK);
+            }
+            long deleted = orphans.delete();
+            log.info(state.getUser(token) + " deleted " + deleted + " orphaned alerts from " + alertmanagers);
+            //so the button goes as soon as the alerts have, rather than at the next ingest
+            state.setOrphans(orphans.count(), orphans.orphanedAlertmanagers());
+            return new ResponseEntity<>(new ServiceResponse<>("Deleted " + deleted + " orphaned alert"
+                    + ((deleted == 1) ? "" : "s") + " from " + String.join(", ", alertmanagers)), HttpStatus.OK);
         } catch (Exception e) {
             log.error(e.getMessage(), e);
             return new ResponseEntity<>(new ServiceResponse<>(e.getMessage()), HttpStatus.INTERNAL_SERVER_ERROR);
@@ -726,12 +774,11 @@ public class RestEndpoint {
         return "";
     }
 
-    //the ticket is labelled "cortana:<fingerprint>" but the alert is stored under the
-    //fingerprint alone, so drop the prefix the UI added
+    //the ticket is labelled "<prefix>:<fingerprint>" but the alert is stored under the
+    //fingerprint alone, so drop the prefix the label was built with
     private boolean storeJiraKey(String jiraId, String key, String status) {
         if (jiraId == null) { return false; }
-        int colon = jiraId.indexOf(':');
-        String id = (colon >= 0) ? jiraId.substring(colon + 1) : jiraId;
+        String id = JiraLabels.fingerprintOf(jiraId);
         Optional<AlertManagerEntry> o = logRepo.findById(id);
         if (o.isEmpty()) { return false; }
         AlertManagerEntry le = o.get();
@@ -739,6 +786,21 @@ public class RestEndpoint {
         le.setJiraStatus(status);
         logRepo.save(le);
         return true;
+    }
+
+    //the prefix this tool asks wraith to label a new ticket with. Wraith puts its own in
+    //front of it, so the label jira ends up holding is JiraLabels.createdPrefix()
+    private String jiraLabelPrefix() {
+        return JiraLabels.prefix(env.getProperty("jira.label.prefix", JiraLabels.DEFAULT_PREFIX));
+    }
+
+    //every prefix to look for an alert's ticket under, as a comma separated list:
+    //whatever raised a ticket decided its prefix, and jira cannot be searched for a
+    //label by its ending, so each prefix in play has to be named
+    private List<String> jiraLabelSearchPrefixes() {
+        return JiraLabels.searchPrefixes(
+                env.getProperty("jira.label.search.prefixes", JiraLabels.DEFAULT_SEARCH_PREFIX),
+                env.getProperty("jira.label.prefix"));
     }
 
     private boolean addNote(String id, String user, String note) throws Exception {

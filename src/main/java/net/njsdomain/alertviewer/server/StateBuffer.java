@@ -47,6 +47,12 @@ public class StateBuffer {
     private final Map<String, Registration> sessions = new HashMap<>();
     private final Map<String, AlertManagerConfig> alertmanagers = new HashMap<>();
 
+    //Alerts left behind by an alertmanager the configuration no longer names, counted
+    //once per ingest cycle rather than on every poll. Written by the ingest thread and
+    //read by the request threads, so both are volatile and the list is replaced whole.
+    private volatile long orphanedAlerts = 0;
+    private volatile List<String> orphanedAlertmanagers = Collections.emptyList();
+
     private final Set<Silence> silences = new HashSet<>();
 
     private AtomicLong ingestDelta = new AtomicLong(0);
@@ -169,6 +175,19 @@ public class StateBuffer {
 
 
 
+    public void setOrphans(long count, List<String> alertmanagers) {
+        orphanedAlerts = count;
+        orphanedAlertmanagers = (alertmanagers == null) ? Collections.emptyList() : List.copyOf(alertmanagers);
+    }
+
+    public long getOrphanedAlerts() {
+        return orphanedAlerts;
+    }
+
+    public List<String> getOrphanedAlertmanagers() {
+        return orphanedAlertmanagers;
+    }
+
     public Set<String> getAlertManagersAll() {
         return alertManagersAll;
     }
@@ -216,7 +235,7 @@ public class StateBuffer {
             msg = "ERROR: No response from alertmanagers within scheduled time.";
             log.error(msg);
         } else {
-            msg = "Ready version " + env.getProperty("build.version") + ".";
+            msg = "Ready - version " + env.getProperty("build.version");
         }
         return msg;
     }
@@ -247,7 +266,8 @@ public class StateBuffer {
     public PollResult poll(String sessionId) throws ServiceException {
         log.trace("Session " + sessionId + " polling...");
         return new PollResult(sessionId, getMessageStack(sessionId), getStatusMessage(),
-                lastIngestSuccess, env.getProperty("build.version"), alertManagersAll, alertManagersUp);
+                lastIngestSuccess, env.getProperty("build.version"), alertManagersAll, alertManagersUp,
+                orphanedAlerts, orphanedAlertmanagers);
     }
 
     public Registration registerSession(String dn, String ingressUsername) throws AuthenticationException {

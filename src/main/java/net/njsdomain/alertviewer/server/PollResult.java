@@ -14,10 +14,16 @@ public class PollResult {
 
     private Map<String, Boolean> alertManagerStatus = new TreeMap<>();
 
+    //Alerts stranded by an alertmanager the configuration no longer names. Nothing can
+    //resolve them, so the UI offers to delete them; see OrphanService.
+    private long orphanedAlerts;
+    private List<String> orphanedAlertmanagers;
+
     private boolean locked;
 
     public PollResult(String sessionId, List<Alert> messageStack, String statusMessage, Instant lastIngestSuccess,
-                      String version, Set<String> alertManagersAll, Set<String> alertManagersUp) {
+                      String version, Set<String> alertManagersAll, Set<String> alertManagersUp,
+                      long orphanedAlerts, List<String> orphanedAlertmanagers) {
         this.messageStack = messageStack;
         this.statusMessage = statusMessage;
         this.lastIngestSuccess = lastIngestSuccess;
@@ -30,6 +36,8 @@ public class PollResult {
             alertManagerStatus.put(s, b);
         }
         this.sessionId = sessionId;
+        this.orphanedAlerts = orphanedAlerts;
+        this.orphanedAlertmanagers = (orphanedAlertmanagers == null) ? List.of() : orphanedAlertmanagers;
     }
 
     public List<Alert> getMessageStack() {
@@ -62,5 +70,13 @@ public class PollResult {
 
     public Map<String, Boolean> getAlertManagerStatus() {
         return alertManagerStatus;
+    }
+
+    public long getOrphanedAlerts() {
+        return orphanedAlerts;
+    }
+
+    public List<String> getOrphanedAlertmanagers() {
+        return orphanedAlertmanagers;
     }
 }

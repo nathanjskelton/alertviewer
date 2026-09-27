@@ -22,6 +22,7 @@ import net.njsdomain.alertviewer.data.alert.Alert;
 import net.njsdomain.alertviewer.data.silence.Silence;
 import net.njsdomain.alertviewer.ingest.Ingester;
 import net.njsdomain.alertviewer.server.CustomDateDeserializer;
+import net.njsdomain.alertviewer.server.OrphanService;
 import net.njsdomain.alertviewer.server.StateBuffer;
 import net.njsdomain.alertviewer.util.LogEntryStatus;
 import net.njsdomain.alertviewer.util.SSLContextFactory;
@@ -67,6 +68,9 @@ public class AlertIngester implements Ingester {
     AlertManagerClient alertManagerClient;
 
     @Autowired
+    OrphanService orphans;
+
+    @Autowired
     AlertManagerConfigParser configParser;
 
     @Autowired
@@ -109,6 +113,31 @@ public class AlertIngester implements Ingester {
         state.setLastIngestAttempt();
         if (online > 0) state.setLastIngestSuccess();
         state.setAlertManagerStatus(max, online);
+        countOrphans();
+    }
+
+    /**
+     * Count the alerts no configured alertmanager claims, so the poll can offer to
+     * delete them.
+     *
+     * Once per cycle rather than once per poll: every session polls every few seconds
+     * and this reads the whole collection's alertmanager field, while what it counts
+     * only moves when an ingest runs or the configuration changes. It is the last thing
+     * the cycle does and its own failure is not the cycle's, so a database that will not
+     * answer this leaves the previous count standing rather than failing the ingest.
+     */
+    private void countOrphans() {
+        try {
+            List<String> alertmanagers = orphans.orphanedAlertmanagers();
+            long count = alertmanagers.isEmpty() ? 0 : orphans.count();
+            if (count > 0) {
+                log.warn(count + " alerts are orphaned: their alertmanagers " + alertmanagers
+                        + " are not configured, so nothing can resolve them");
+            }
+            state.setOrphans(count, alertmanagers);
+        } catch (Exception e) {
+            log.error("Unable to count orphaned alerts", e);
+        }
     }
 
     /**
@@ -616,15 +645,17 @@ public class AlertIngester implements Ingester {
                 objectMapper.registerModule(module);
                 Silence silence = objectMapper.readValue(jsonSilence, Silence.class);
                 silence.setAlertmanager(amConfig.getName());
-                log.debug("silence state is '"+silence.getStatus().getState()+"'");
-                if (silence.getStatus().getState().equals("active")) {
-                    //set hours based on dates
-                    Duration dur = Duration.between(silence.getStartsat(), silence.getEndsat());
-                    silence.setHours(dur.toHours());
-                    Duration rem = Duration.between(LocalDateTime.now(ZoneOffset.UTC), silence.getEndsat());
-                    silence.setHoursLeft(rem.toHours());
-                    existingSilences.add(silence);
-                }
+                log.debug("silence state is '"+(silence.getStatus() == null ? null : silence.getStatus().getState())+"'");
+                //pending and expired silences are listed alongside the active ones, so the
+                //ui can show what is still to start and what has just gone. it reads the
+                //state off the silence and marks them.
+                //set hours based on dates
+                Duration dur = Duration.between(silence.getStartsat(), silence.getEndsat());
+                silence.setHours(dur.toHours());
+                //negative once the silence is over, which is how the ui tells expired apart
+                Duration rem = Duration.between(LocalDateTime.now(ZoneOffset.UTC), silence.getEndsat());
+                silence.setHoursLeft(rem.toHours());
+                existingSilences.add(silence);
             }
             log.debug("SILENCES ADDED: "+existingSilences.size());
         } catch(Exception e) {

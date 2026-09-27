@@ -2,6 +2,8 @@ package net.njsdomain.alertviewer.data.jira;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.List;
+
 /**
  * Reading wraith's two answers about jira tickets.
  *
@@ -31,6 +33,23 @@ public final class WraithTickets {
         JsonNode closed = null;
         for (JsonNode ticket : tickets) {
             if (key(ticket) == null) { continue; }
+            if (!isClosed(ticket)) { return ticket; }
+            if (closed == null) { closed = ticket; }
+        }
+        return closed;
+    }
+
+    /**
+     * The ticket the alert should follow when its fingerprint can be labelled several
+     * ways, one per configured prefix: the best on offer across all of them, an open
+     * ticket winning over a closed one whichever label carried it. Null when no label
+     * listed a usable ticket.
+     */
+    public static JsonNode preferred(JsonNode found, List<String> labels) {
+        JsonNode closed = null;
+        for (String label : labels) {
+            JsonNode ticket = preferred(found, label);
+            if (ticket == null) { continue; }
             if (!isClosed(ticket)) { return ticket; }
             if (closed == null) { closed = ticket; }
         }
