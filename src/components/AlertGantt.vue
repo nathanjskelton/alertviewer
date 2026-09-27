@@ -6,9 +6,9 @@
       <span class="gantt__sub">{{ spanLabel }} &middot; {{ rows.length }} alert{{ rows.length == 1 ? '' : 's' }}</span>
       <v-spacer></v-spacer>
       <!-- only worth offering when the window actually holds some -->
-      <v-switch v-if="silencedCount > 0" v-model="showSilenced" hide-details density="compact"
-          color="blue-grey" class="gantt__silenced-toggle"
-          :label="(showSilenced ? 'Hide' : 'Show') + ' ' + silencedCount + ' silenced'"></v-switch>
+      <v-switch v-if="suppressedCount > 0" v-model="showSuppressed" hide-details density="compact"
+          color="blue-grey" class="gantt__suppressed-toggle"
+          :label="(showSuppressed ? 'Hide' : 'Show') + ' ' + suppressedCount + ' suppressed'"></v-switch>
       <v-btn size="small" variant="tonal" color="purple" prepend-icon="mdi-close" @click="$emit('close')">
         Close
       </v-btn>
@@ -23,8 +23,8 @@
     </div>
 
     <div v-if="rows.length == 0" class="gantt__empty">
-      <template v-if="silencedCount > 0">
-        Nothing was firing in the selected window except {{ silencedCount }} silenced alert{{ silencedCount == 1 ? '' : 's' }}.
+      <template v-if="suppressedCount > 0">
+        Nothing was firing in the selected window except {{ suppressedCount }} suppressed alert{{ suppressedCount == 1 ? '' : 's' }}.
       </template>
       <template v-else>
         No alerts were firing in the selected window.
@@ -36,11 +36,14 @@
         <div class="gantt__grid">
           <span v-for="tick in ticks" :key="'g-' + tick.ms" class="gantt__gridline" :style="{ left: tick.pct + '%' }"></span>
         </div>
-        <div v-for="row in rows" :key="row.id" class="gantt__row" :class="{ 'gantt__row--silenced': row.silenced }">
+        <div v-for="row in rows" :key="row.id" class="gantt__row" :class="{ 'gantt__row--suppressed': row.suppressed }">
           <div class="gantt__label">
-            <v-icon v-if="row.silenced" size="14" color="blue-grey" class="gantt__silenced-icon"
-                title="Silenced">mdi-sleep</v-icon>
-            <span v-else class="gantt__dot" :style="{ background: severityColor(row.severity) }"></span>
+            <!-- one icon per reason it was off the board, since a row can be silenced,
+                 acked and ticketed across the window and "zzz" only says the first -->
+            <v-icon v-for="reason in row.reasons" :key="'r-' + row.id + '-' + reason"
+                size="14" color="blue-grey" class="gantt__suppressed-icon"
+                :title="reasonTitle(reason)">{{ reasonIcon(reason) }}</v-icon>
+            <span v-if="!row.suppressed" class="gantt__dot" :style="{ background: severityColor(row.severity) }"></span>
             <span class="gantt__name" :title="row.alertname">{{ row.alertname }}</span>
             <span class="gantt__env" :title="row.instance">{{ row.environment || '—' }}</span>
           </div>
@@ -51,13 +54,13 @@
               :style="{ left: row.leftPct + '%', width: row.widthPct + '%', background: severityColor(row.severity) }"
               :title="barTitle(row)"
             ></div>
-            <!-- the stretches it was muted for, laid over the bar so the same row
-                 shows what was notifying and what was not -->
+            <!-- the stretches it was off the board for, laid over the bar so the same
+                 row shows what was notifying and what was not -->
             <div
-              v-for="(quiet, i) in row.silencedBars" :key="'q-' + row.id + '-' + i"
-              class="gantt__bar gantt__bar--silenced"
+              v-for="(quiet, i) in row.suppressedBars" :key="'q-' + row.id + '-' + i"
+              class="gantt__bar gantt__bar--suppressed"
               :style="{ left: quiet.leftPct + '%', width: quiet.widthPct + '%' }"
-              :title="'Silenced ' + formatStamp(quiet.start) + ' – ' + (quiet.end == null ? 'still' : formatStamp(quiet.end))"
+              :title="reasonLabel(quiet.reasons) + ' ' + formatStamp(quiet.start) + ' – ' + (quiet.end == null ? 'still' : formatStamp(quiet.end))"
             ></div>
           </div>
         </div>
@@ -76,11 +79,26 @@
   // to reach far enough that a wide selection still snaps to ~8 ticks.
   const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880]
 
+  // Why an alert was off the board, each with the icon the alert table uses for it, so
+  // the same thing is recognisable in both. All in the same quiet colour as the rest of
+  // a suppressed row: which of the three it was matters less than that it was one.
+  const REASONS = {
+    silenced: { icon: 'mdi-sleep', title: 'Silenced', label: 'Silenced' },
+    acked: { icon: 'mdi-account-check', title: 'Acked', label: 'Acked' },
+    jira: { icon: 'mdi-jira', title: 'Has a jira ticket', label: 'Ticketed' },
+  }
+  //the order they read in, rather than whichever happened to come first
+  const REASON_ORDER = ['silenced', 'acked', 'jira']
+
   export default {
     name: 'AlertGantt',
     props: {
-      // [{ id, alertname, environment, instance, severity, status, start, end }]
-      // end == null means the alert is still firing.
+      // [{ id, alertname, environment, instance, severity, status, acked, jiraKey,
+      // suppressed, suppressedWindows, start, end }]. end == null means the alert is
+      // still firing.
+      //
+      // A silence, an ack and a jira ticket all take an alert off the board, so all
+      // three arrive as suppressed stretches and are drawn the same way.
       items: {
         type: Array,
         default: () => []
@@ -92,13 +110,13 @@
     data() {
       return {
         //off by default: the window is for seeing what was actually firing
-        showSilenced: false,
+        showSuppressed: false,
       }
     },
     computed: {
-      // rows that were muted for the whole window, which are the ones hidden by default
-      silencedCount() {
-        return this.items.filter(item => item.silenced).length
+      // rows off the board for the whole window, which are the ones hidden by default
+      suppressedCount() {
+        return this.items.filter(item => item.suppressed).length
       },
       span() {
         return Math.max(60000, this.end - this.start)
@@ -139,33 +157,36 @@
       },
       rows() {
         const now = Date.now()
-        const visible = this.showSilenced ? this.items : this.items.filter(item => !item.silenced)
+        const visible = this.showSuppressed ? this.items : this.items.filter(item => !item.suppressed)
         return visible.map(item => {
           const from = Math.max(item.start, this.start)
           const to = Math.min(item.end == null ? now : item.end, this.end)
           const leftPct = (from - this.start) / this.span * 100
           const widthPct = Math.max(0.4, (Math.max(to, from) - from) / this.span * 100)
+          const bars = this.suppressedBars(item, now)
           return Object.assign({}, item, {
             leftPct: leftPct,
             widthPct: Math.min(widthPct, 100 - leftPct),
             clippedLeft: item.start < this.start,
             clippedRight: (item.end == null ? now : item.end) > this.end,
-            silencedBars: this.silencedBars(item, now),
+            suppressedBars: bars,
+            reasons: this.reasonsOf(bars),
           })
         })
       },
     },
     methods: {
-      // Each muted stretch of one alert, clipped to the window on screen.
-      silencedBars(item, now) {
+      // Each suppressed stretch of one alert, clipped to the window on screen.
+      suppressedBars(item, now) {
         const out = []
-        const windows = item.silencedWindows || []
+        const windows = item.suppressedWindows || []
         for (let i = 0; i < windows.length; i++) {
           const from = Math.max(windows[i].start, this.start)
           const to = Math.min(windows[i].end == null ? now : windows[i].end, this.end)
           if (to <= from) { continue }
           const leftPct = (from - this.start) / this.span * 100
           out.push({
+            reasons: windows[i].reasons || [],
             start: windows[i].start,
             end: windows[i].end,
             leftPct: leftPct,
@@ -200,14 +221,37 @@
         const sameDay = at.toISOString().slice(0, 10) == new Date().toISOString().slice(0, 10)
         return (sameDay ? '' : (at.getUTCMonth() + 1) + '/' + at.getUTCDate() + ' ') + this.formatTime(ms)
       },
+      reasonIcon(reason) {
+        return REASONS[reason].icon
+      },
+      reasonTitle(reason) {
+        return REASONS[reason].title
+      },
+      // Every reason this row was off the board for any part of the window on screen.
+      // Read off the stretches themselves rather than the alert's state today, which
+      // would mislabel one acked through the window and unacked since.
+      reasonsOf(bars) {
+        const seen = []
+        bars.forEach(bar => {
+          (bar.reasons || []).forEach(reason => {
+            if (REASONS[reason] != null && seen.indexOf(reason) < 0) { seen.push(reason) }
+          })
+        })
+        return REASON_ORDER.filter(reason => seen.indexOf(reason) >= 0)
+      },
+      // "Acked", or "Silenced + acked" where a stretch was both at once.
+      reasonLabel(reasons) {
+        const named = REASON_ORDER.filter(r => (reasons || []).indexOf(r) >= 0)
+        if (named.length == 0) { return 'Suppressed' }
+        return named.map((r, i) => i == 0 ? REASONS[r].label : REASONS[r].label.toLowerCase()).join(' + ')
+      },
       barTitle(row) {
         let text = row.alertname
         if (row.instance) { text += ' @ ' + row.instance }
         text += '\n' + (row.severity || 'unknown') + ' · ' + row.status
-        if (row.silenced) {
-          text += '\nsilenced for the whole of this window'
-        } else if (row.silencedBars && row.silencedBars.length > 0) {
-          text += '\nsilenced for part of this window'
+        if (row.reasons.length > 0) {
+          text += '\n' + this.reasonLabel(row.reasons).toLowerCase() +
+              (row.suppressed ? ' for the whole of this window' : ' for part of this window')
         }
         text += '\nfired ' + this.formatStamp(row.start)
         text += '\n' + (row.end == null ? 'still firing' : 'ended ' + this.formatStamp(row.end))
@@ -362,10 +406,11 @@
 .gantt__bar--open-left.gantt__bar--open-right {
   box-shadow: inset 3px 0 0 rgba(255, 255, 255, 0.55), inset -3px 0 0 rgba(255, 255, 255, 0.55);
 }
-/* A silenced alert was firing, but deliberately muted. It has to stay visibly
+/* A suppressed alert was firing, but somebody had deliberately taken it off the
+   board -- silenced, acked, or turned into a jira ticket. It has to stay visibly
    apart from live firing: faded, hatched rather than solid, and named in grey,
    so no one reads a silenced bar as something that wanted attention. */
-.gantt__bar--silenced {
+.gantt__bar--suppressed {
   background: repeating-linear-gradient(
     45deg,
     #cbd5e1 0,
@@ -375,20 +420,20 @@
   );
   box-shadow: inset 0 0 0 1px rgba(100, 116, 139, 0.45);
 }
-.gantt__row--silenced .gantt__name,
-.gantt__row--silenced .gantt__env {
+.gantt__row--suppressed .gantt__name,
+.gantt__row--suppressed .gantt__env {
   color: #94a3b8;
   font-style: italic;
 }
-.gantt__silenced-icon {
+.gantt__suppressed-icon {
   flex: 0 0 14px;
 }
 /* The switch sits in a flex header row built for chips and buttons. */
-.gantt__silenced-toggle {
+.gantt__suppressed-toggle {
   flex: 0 0 auto;
   margin-right: 12px;
 }
-.gantt__silenced-toggle :deep(.v-label) {
+.gantt__suppressed-toggle :deep(.v-label) {
   font-size: 12px;
   opacity: 1;
   color: #64748b;

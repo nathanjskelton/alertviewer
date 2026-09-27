@@ -39,11 +39,11 @@ export default {
           return;
         }
         // Count only the stretches the alert was actually notifying. Dropping a
-        // silenced alert whole would erase the hours it fired before anyone muted
-        // it; counting it whole puts a hump in the graph for something deliberately
-        // turned off. Neither is what the line is meant to show.
-        const quiet = this.silencedWindows(item, firing);
-        this.unsilencedParts(firing, quiet, now).forEach(part => {
+        // silenced, acked or ticketed alert whole would erase the hours it fired
+        // before anyone took it on; counting it whole puts a hump in the graph for
+        // something deliberately turned off. Neither is what the line is meant to show.
+        const quiet = this.suppressedWindows(item, firing);
+        this.notifyingParts(firing, quiet, now).forEach(part => {
           if (part.end != null && part.end < windowStart) {
             return;
           }
@@ -66,10 +66,11 @@ export default {
         if (firing.start > selection.end || end < selection.start) {
           return;
         }
-        const quiet = this.silencedWindows(item, firing);
-        // whether any of this alert's unsilenced time falls inside the window being
-        // looked at. If none does, it was muted throughout and is hidden by default
-        const notifying = this.unsilencedParts(firing, quiet, now).some(part => {
+        const quiet = this.suppressedWindows(item, firing);
+        // whether any of this alert's notifying time falls inside the window being
+        // looked at. If none does, it was off the board throughout and is hidden by
+        // default
+        const notifying = this.notifyingParts(firing, quiet, now).some(part => {
           const partEnd = part.end == null ? now : part.end;
           return part.start < selection.end && partEnd > selection.start;
         });
@@ -81,11 +82,11 @@ export default {
           severity: item.alert.labels.severity,
           summary: this.getSummaryHeader(item.alert.labels.alertname, item.alert.annotations.summary),
           status: item.status,
-          // carried rather than filtered out here: the gantt hides fully silenced
-          // rows by default but can show them, and it hatches the muted stretches of
-          // the ones it does show
-          silenced: !notifying,
-          silencedWindows: quiet,
+          // carried rather than filtered out here: the gantt hides rows that were off
+          // the board throughout by default but can show them, and it hatches the
+          // suppressed stretches of the ones it does show
+          suppressed: !notifying,
+          suppressedWindows: quiet,
           start: firing.start,
           end: firing.end,
         });
@@ -94,7 +95,7 @@ export default {
       return rows;
     }
   },
-  emits: ['alerts','alert','status','token','user','role','banner','retention','alertManagerStatus','lastIngest','alertIntervals','closeTimeline'],
+  emits: ['alerts','alert','status','version','token','user','role','banner','retention','alertManagerStatus','lastIngest','alertIntervals','closeTimeline'],
   data() {
     return {
       // How far back the backend still keeps RESOLVED alerts. Replaced by the
@@ -107,6 +108,10 @@ export default {
       // includes RESOLVED, since `info` then holds them in full.
       history: [],
       rowsPerPage: null,
+      //ids for the poll and auto-refresh timers, so unmounted() can stop them
+      startupTimer: null,
+      pollTimer: null,
+      fetchTimer: null,
       // "NOT CALLIN" in the Attributes filter: ticked means don't care about the
       // callin label and show every alert; unticked narrows to callin alerts
       // only. Ticked by default so links made before this filter existed, and
@@ -152,6 +157,14 @@ export default {
         running: false,
         clear: false,
       },
+      // Alerts left behind by an alertmanager that is no longer configured, as the
+      // poll last reported them. count > 0 is what puts the delete button on screen.
+      orphans: {
+        dialog: false,
+        running: false,
+        count: 0,
+        alertmanagers: [],
+      },
 
       // Base of the jira instance, from the login response. Empty until then,
       // and empty if the backend has no jira.base.url configured, which is what
@@ -161,10 +174,12 @@ export default {
       //jira control comes off the screen rather than sitting there doing nothing
       jiraEnabled: false,
 
-      // Prefix the backend puts on the jira label that carries the fingerprint.
-      // Same value the rebuild searches on, so the details panel shows the label
-      // exactly as it appears on the ticket.
-      jiraLabelPrefix: 'alertmanager',
+      // Prefix on the jira label that carries the fingerprint, as jira spells it:
+      // what the backend asks wraith to label a ticket with, with wraith's own
+      // prefix already in front. Display only -- the backend builds the label it
+      // creates under -- so the details panel can show it exactly as it appears
+      // on the ticket.
+      jiraLabelPrefix: 'wraith:cortana',
 
       currentSilence: {
         matchers: [
@@ -193,6 +208,10 @@ export default {
         item: null,
       },
       annotationsDialog: {
+        dialog: false,
+        item: null,
+      },
+      notesDialog: {
         dialog: false,
         item: null,
       },
@@ -495,7 +514,7 @@ export default {
     window.console.log("**** STARTING ****");
     this.login();
 
-    setTimeout(() => {
+    this.startupTimer = setTimeout(() => {
       console.log("*** ALERTS TIMEOUT FIRED ***");
       console.log(this.dataTable);
       console.log("statuses:"+this.query.statuses);
@@ -563,24 +582,34 @@ export default {
         this.expandMode = this.query.grpExpMode;
       }
 
-      if (this.query.rowsPerPage == null) {
-        this.rowsPerPage = 15;
-      } else {
-        this.rowsPerPage = this.query.rowsPerPage;
-      }
+      // The url is the only place this arrives as text -- the selector's items are
+      // numbers -- and the table's rows-per-page prop is typed Number, so assigning
+      // the raw "15" warns on every render of every group table for the whole session.
+      const perPage = Number(this.query.rowsPerPage);
+      this.rowsPerPage = (isFinite(perPage) && perPage > 0) ? perPage : 15;
       
       this.poll();
       this.fetchData();
     }, 1000);
 
-    setInterval(() => {
+    // Kept so they can be stopped again. Nothing on the other pages reads the poll or
+    // the alert list, and an interval left running outlives the component that made it:
+    // every visit back to this page used to add another pair, so the server was polled
+    // once per five seconds per visit for the life of the tab.
+    this.pollTimer = setInterval(() => {
       this.poll();
     }, 5000);
 
-    setInterval(() => {
+    this.fetchTimer = setInterval(() => {
       this.autoFetchData();
     }, 15000);
 
+  },
+  unmounted() {
+    //the alerts page is the only page any of this feeds
+    clearTimeout(this.startupTimer);
+    clearInterval(this.pollTimer);
+    clearInterval(this.fetchTimer);
   },
  
   methods: {
@@ -664,24 +693,30 @@ export default {
           this.$emit("retention", this.retentionMinutes);
           this.jiraBaseUrl = response.headers['cortana-jira-url'] || '';
           this.jiraEnabled = String(response.headers['cortana-jira-enabled'] || '') == 'true';
-          this.jiraLabelPrefix = response.headers['cortana-jira-label-prefix'] || 'alertmanager';
+          this.jiraLabelPrefix = response.headers['cortana-jira-label-prefix'] || 'wraith:cortana';
           console.log("HEADERS "+response.headers)
         });
     },
 
     poll() {
-      console.log("POLLING: "+this.baseUrl)
       axios
         .get(this.baseUrl + "poll", {headers: {"CORTANA-TOKEN": this.cortana_token}})
         .then(response => {
           this.sessionId = response.data.payload.sessionId;
           //this.$emit("alerts", response.data.payload.messageStack); 
           this.$emit("status", response.data.payload.statusMessage);
+          //held by the layout, which still has a footer to fill once this page and its
+          //polling have gone
+          this.$emit("version", response.data.payload.version);
           this.$emit("lastIngest", response.data.payload.lastIngestSecs);
           this.$emit("alertManagerStatus", response.data.payload.alertManagerStatus);
           // Keep a local copy so rows can flag alerts from an offline
           // alertmanager (i.e. potentially stale) data.
           this.alertManagerStatus = response.data.payload.alertManagerStatus;
+          // Alerts whose alertmanager is no longer configured. Nothing can resolve
+          // them, so an admin is offered the only way out: deleting them.
+          this.orphans.count = Number(response.data.payload.orphanedAlerts) || 0;
+          this.orphans.alertmanagers = response.data.payload.orphanedAlertmanagers || [];
 
         })
         .catch(error => {
@@ -768,6 +803,18 @@ export default {
         }
       });
       return tags;
+    },
+    getUserNotes(item) {
+      // Notes somebody wrote, as opposed to bookkeeping -- both are noise in a list
+      // meant to surface what an operator had to say about the alert. Two sources:
+      // the ingester's running commentary on every status change, written under the
+      // "System" user, and the jira trail. The jira notes are written under the
+      // acting user, so only their "Jira: " prefix tells them apart -- every note
+      // the link and rebuild endpoints add starts with it (create adds none), while
+      // a note typed in the UI is always sent prefixed "Note: ".
+      let notes = (item && item.notes) || [];
+      return notes.filter(n => n != null && n.user != "System"
+          && !/^jira:/i.test(String(n.message == null ? "" : n.message).trimStart()));
     },
     getLabelColor(label) {
       // Deterministically pick a color from a palette based on the key name,
@@ -906,55 +953,131 @@ export default {
       const ms = new Date(zoned).getTime();
       return isFinite(ms) ? ms : null;
     },
-    // When this alert was silenced, as [{start, end}] clipped to its firing window.
-    // end == null means it was still silenced when the window ended.
+    // Every stretch of a firing window this alert was off the board for, as
+    // [{start, end}] clipped to that window, overlaps flattened. end == null means it
+    // was still off the board when the window ended.
+    //
+    // Three things take an alert off the board and none of them is the alert going
+    // quiet: a silence mutes it, an ack says somebody is holding it, and a jira ticket
+    // says it has become somebody's work item. The graph is a count of what wanted
+    // attention, so it must not count any of them, and the gantt draws all three the
+    // same muted way.
+    suppressedWindows(item, firing) {
+      return this.mergeWindows([].concat(
+        this.silencedWindows(item, firing),
+        this.ackedWindows(item, firing),
+        this.jiraWindows(item, firing)
+      ), firing);
+    },
+    // When this alert was silenced.
     silencedWindows(item, firing) {
+      // lastChange is the moment the status moved, so it dates a silence the notes
+      // never got round to: an alert already muted when it was first seen only gets
+      // its note on the next cycle
+      return this.flagWindows(item, firing, 'silenced', message => {
+        const status = this.noteStatus(message);
+        return status == null ? null : status == 'SILENCED';
+      }, this.isSilenced(item), Number(item && item.lastChange));
+    },
+    // When this alert was acked. "Acked"/"Unacked" is what the mark endpoint notes,
+    // and the ingester clears an ack itself when a resolved alert fires again.
+    ackedWindows(item, firing) {
+      return this.flagWindows(item, firing, 'acked', message => {
+        const text = String(message == null ? '' : message).trim();
+        if (text == 'Acked') { return true; }
+        if (text == 'Unacked') { return false; }
+        if (/ACK cleared/.test(text)) { return false; }
+        return null;
+      }, item != null && item.acked == true, null);
+    },
+    // When this alert had a jira ticket. Creating or linking one opens the window and
+    // a rebuild that finds no ticket closes it; a ticket opening or closing in jira
+    // does not, since the alert is still linked to work either way.
+    jiraWindows(item, firing) {
+      const key = (item == null || item.jiraKey == null) ? '' : String(item.jiraKey).trim();
+      return this.flagWindows(item, firing, 'jira', message => {
+        const text = String(message == null ? '' : message).trim();
+        if (!/^Jira:/i.test(text)) { return null; }
+        if (/^Jira: rebuild cleared/i.test(text)) { return false; }
+        if (/^Jira: (created|linked|rebuild linked)/i.test(text)) { return true; }
+        return null;
+      }, key != '', null);
+    },
+    // The stretches something was switched on for, read off the note trail: reads()
+    // returns true for a note that switches it on, false for one that switches it off
+    // and null for one that says nothing about it. Each stretch is tagged with
+    // `reason` so the gantt can say why it was off the board, which is not something
+    // the alert's state today can answer -- an alert acked for the whole of the window
+    // being looked at may well have been unacked since.
+    //
+    // onNow is the record's own flag, trusted when the notes never opened a window --
+    // it may have been set before the first note, or by something that writes none --
+    // dated from `since` when that is a time inside the window, and from the start of
+    // the window otherwise.
+    flagWindows(item, firing, reason, reads, onNow, since) {
       const now = Date.now();
       const windowEnd = firing.end == null ? now : firing.end;
       const notes = (item && item.notes) ? item.notes : [];
       const events = [];
       for (let i = 0; i < notes.length; i++) {
-        const status = this.noteStatus(notes[i].message);
-        if (status == null) { continue; }
+        const on = reads(notes[i].message);
+        if (on == null) { continue; }
         const at = this.noteTime(notes[i]);
-        if (at != null) { events.push({ at: at, status: status }); }
+        if (at != null) { events.push({ at: at, on: on }); }
       }
-      // notes come back newest first, and a silence only makes sense read forwards
+      // notes come back newest first, and switching on and off only makes sense read
+      // forwards
       events.sort((a, b) => a.at - b.at);
 
       const out = [];
       let openedAt = null;
       events.forEach(event => {
-        if (event.status == 'SILENCED') {
+        if (event.on) {
           if (openedAt == null) { openedAt = event.at; }
         } else if (openedAt != null) {
-          out.push({ start: Math.max(openedAt, firing.start), end: Math.min(event.at, windowEnd) });
+          out.push({ reason: reason, start: Math.max(openedAt, firing.start),
+              end: Math.min(event.at, windowEnd) });
           openedAt = null;
         }
       });
       if (openedAt != null) {
-        out.push({ start: Math.max(openedAt, firing.start), end: firing.end });
+        out.push({ reason: reason, start: Math.max(openedAt, firing.start), end: firing.end });
       }
 
-      // The status is the truth about now, so if the notes never accounted for the
-      // alert being silenced, trust it over them. An alert already suppressed when it
-      // was first seen only gets its note on the next cycle, and lastChange is the
-      // moment its status moved.
-      if (this.isSilenced(item) && openedAt == null) {
-        const since = Number(item.lastChange);
-        out.push({
-          start: (isFinite(since) && since > firing.start) ? since : firing.start,
-          end: firing.end
-        });
+      if (onNow && openedAt == null) {
+        const from = (since != null && isFinite(since) && since > firing.start) ? since : firing.start;
+        out.push({ reason: reason, start: from, end: firing.end });
       }
       return out.filter(w => (w.end == null ? windowEnd : w.end) > w.start);
     },
-    // The parts of a firing window left once the silenced stretches are cut out of
-    // it. An alert silenced halfway through was genuinely notifying until then.
-    unsilencedParts(firing, silenced, now) {
+    // One set of stretches out of several that may overlap -- an alert can be acked
+    // and ticketed at once -- so nothing is drawn or subtracted twice over. A merged
+    // stretch keeps every reason that went into it, since all of them were true of it.
+    mergeWindows(windows, firing) {
+      const now = Date.now();
+      const windowEnd = firing.end == null ? now : firing.end;
+      const sorted = windows.slice().sort((a, b) => a.start - b.start);
+      const out = [];
+      sorted.forEach(w => {
+        const last = out.length == 0 ? null : out[out.length - 1];
+        if (last == null || w.start > (last.end == null ? windowEnd : last.end)) {
+          out.push({ reasons: [w.reason], start: w.start, end: w.end });
+          return;
+        }
+        if (last.reasons.indexOf(w.reason) < 0) { last.reasons.push(w.reason); }
+        // a null end already runs to the edge of the window, so nothing extends it
+        if (last.end == null) { return; }
+        if (w.end == null) { last.end = null; return; }
+        if (w.end > last.end) { last.end = w.end; }
+      });
+      return out;
+    },
+    // The parts of a firing window left once the suppressed stretches are cut out of
+    // it. An alert acked halfway through was genuinely notifying until then.
+    notifyingParts(firing, suppressed, now) {
       const windowEnd = firing.end == null ? now : firing.end;
       let parts = [{ start: firing.start, end: firing.end }];
-      silenced.forEach(quiet => {
+      suppressed.forEach(quiet => {
         const quietStart = quiet.start;
         const quietEnd = quiet.end == null ? windowEnd : quiet.end;
         const next = [];
@@ -997,9 +1120,7 @@ export default {
       return mins + "m";
     },
     getColorByPercent(pct) {
-      let value = "rgba(255, 0, 0, "+(pct/100)+")";
-      console.log("VALUE: "+value);
-      return value;
+      return "rgba(255, 0, 0, "+(pct/100)+")";
     },
     getLastOccColor(item) {
       let color = "gray";
@@ -1120,7 +1241,9 @@ export default {
         });
     },
     newJira(item) {
-      this.currentJira.id = "cortana:" + item.alert.fingerprint;
+      //just the fingerprint: which prefix the ticket is labelled with is the
+      //backend's configuration (jira.label.prefix), not the dialog's to decide
+      this.currentJira.id = item.alert.fingerprint;
       this.currentJira.description = item.alert.annotations.summary;
       this.currentJira.summary = "Cortana: " + item.alert.labels.alertname;
       this.currentJira.system = item.alert.labels.environment;
@@ -1174,6 +1297,25 @@ export default {
     //re-point every alert at the ticket jira labels with its fingerprint. Admin
     //only, and only reached through the confirmation dialog, which is also where
     //the tickbox for dropping the links no ticket claims lives.
+    deleteOrphanedAlerts() {
+      this.orphans.dialog = false;
+      this.orphans.running = true;
+      axios
+        .delete(this.baseUrl + "orphans", {headers: {"CORTANA-TOKEN": this.cortana_token}})
+        .then(response => {
+          this.orphans.running = false;
+          this.onSuccess(response);
+          //the backend clears its own count on the way out, but the next poll is up to
+          //five seconds away and the rows have gone now
+          this.orphans.count = 0;
+          this.orphans.alertmanagers = [];
+          this.fetchData();
+        })
+        .catch(error => {
+          this.orphans.running = false;
+          this.handleError(error);
+        });
+    },
     rebuildJiraLinks() {
       this.jiraRebuild.dialog = false;
       this.jiraRebuild.running = true;
@@ -1300,7 +1442,6 @@ export default {
       this.copyDialog.title = '';
     },
     setQueryString() {
-      console.log("updating query string");
       this.router.push({
         query: {
           severity: this.searchSeverity,
@@ -1410,11 +1551,9 @@ export default {
         window.open(urlString, "_blank");
         this.loading=false;
       } else {
-        console.log("FETCHING: "+urlString)
         axios
           .get(urlString, {headers: {"CORTANA-TOKEN": this.cortana_token}})
           .then(response => {
-            console.log(response.data.payload);
             this.payload = response.data.payload;
             this.silences = response.data.payload.silences;
             this.alertmanagers = response.data.payload.alertmanagers;

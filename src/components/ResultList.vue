@@ -141,6 +141,18 @@
         <v-icon>mdi-link-variant</v-icon>
       </v-btn>
 
+      <!-- Admin only, and only when the poll has found some: alerts whose alertmanager
+           is no longer configured can never be resolved, so deleting them is the only
+           way they leave the view. Confirmed first, since they go for good. -->
+      <v-btn v-if="cortana_role == 'admin' && orphans.count > 0" block class="mt-4 drawer-btn-wrap" height=50
+          :loading="orphans.running" @click="orphans.dialog = true"
+          style="background-color:rgba(0, 0, 0, 0.04);"
+          :title="orphans.count + ' alerts came from an alertmanager that is no longer configured, so nothing can resolve them.'">
+        <span class="mr-2">Delete Orphaned Alerts</span>
+        <v-chip size="small" color="red" class="mr-2">{{ orphans.count }}</v-chip>
+        <v-icon>mdi-delete-sweep</v-icon>
+      </v-btn>
+
     </div>
   </v-navigation-drawer>
 
@@ -294,6 +306,23 @@
     </v-card>
   </v-dialog>
 
+  <v-dialog max-width="600px" v-model="notesDialog.dialog">
+    <v-card v-if="notesDialog.item != null">
+      <v-card-title class="pa-3" style="background-color: #0369A1; color: white; font-size: medium; font-weight: bold;">
+        <table style="width: 100%;"><tr>
+          <td>Notes</td>
+          <td align="right"><v-icon color="white" @click="notesDialog.dialog=false;">mdi-window-close</v-icon></td>
+        </tr></table>
+      </v-card-title>
+      <v-card-text class="pa-3">
+        <div v-for="note in getUserNotes(notesDialog.item)" :key="note.timestamp" class="mb-2">
+          <div style="font-size: 12px;"><v-chip size="small">{{ note.timestamp }}</v-chip><v-chip size="small">{{ note.user }}</v-chip></div>
+          <div style="font-size: 12px; white-space: pre-wrap;">{{ note.message }}</div>
+        </div>
+      </v-card-text>
+    </v-card>
+  </v-dialog>
+
   <v-dialog max-width="500px" v-model="copyDialog.dialog">
     <v-card>
       <v-card-title>{{copyDialog.title}}</v-card-title>
@@ -322,6 +351,32 @@
       <v-card-actions>
         <v-btn color="blue-darken-1" text @click="rebuildJiraLinks();">Rebuild</v-btn>
         <v-btn color="blue-darken-1" text @click="jiraRebuild.dialog=false;">Cancel</v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
+
+  <v-dialog max-width="600px" v-model="orphans.dialog" persistent>
+    <v-card>
+      <v-card-title class="pa-4" style="background-color: purple; color: white; font-size: large; font-weight: bold;">
+        Delete Orphaned Alerts
+      </v-card-title>
+      <v-card-text class="pt-4">
+        {{ orphans.count }} alert{{ orphans.count == 1 ? '' : 's' }} in the database came from
+        <span style="font-weight: bold;">{{ orphans.alertmanagers.join(', ') }}</span>,
+        which {{ orphans.alertmanagers.length == 1 ? 'is' : 'are' }} not in this deployment's
+        configuration. Only the alertmanager an alert came from can resolve it, so these will
+        read as firing for as long as they are kept, and the retention sweep never reaches them.
+        <div class="mt-2" style="font-weight: bold;">
+          They are deleted outright. This cannot be undone.
+        </div>
+        <div class="mt-2" style="font-size: 12px; color: #666;">
+          If one of these alertmanagers should still be configured, fix the configuration
+          instead: the alerts will start resolving again on the next ingest.
+        </div>
+      </v-card-text>
+      <v-card-actions>
+        <v-btn color="blue-darken-1" text @click="deleteOrphanedAlerts();">Delete</v-btn>
+        <v-btn color="blue-darken-1" text @click="orphans.dialog=false;">Cancel</v-btn>
       </v-card-actions>
     </v-card>
   </v-dialog>
@@ -797,6 +852,10 @@
                   class="ml-1" style="cursor: pointer;" title="View annotations"
                   @click.stop="annotationsDialog.item=item; annotationsDialog.dialog=true;">mdi-note-text</v-icon>
 
+              <v-icon v-if="getUserNotes(item).length > 0" color="#38BDF8"
+                  class="ml-1" style="cursor: pointer;" title="View notes"
+                  @click.stop="notesDialog.item=item; notesDialog.dialog=true;">mdi-comment-text-outline</v-icon>
+
               <v-icon v-if="isCallin(item)" color="#16A34A"
                   class="ml-1" title="Call-in alert">mdi-phone</v-icon>
 
@@ -947,7 +1006,17 @@
 
 <!-- Add "scoped" attribute to limit CSS to this component only -->
 <style scoped>
-/* Status + annotations + jira indicators share one fixed-width column, so they
+/* The drawer is only as wide as the filter card, and a v-btn label is uppercased and
+   letter-spaced, so a label of more than a couple of words overflows its button rather
+   than wrapping: v-btn__content is nowrap by default. Let it use the second line the
+   50px height already allows. */
+.drawer-btn-wrap :deep(.v-btn__content) {
+  white-space: normal;
+  line-height: 1.15;
+  letter-spacing: 0.04em;
+}
+
+/* Status + annotations + notes + jira indicators share one fixed-width column, so they
    must never be squashed: a shrunk v-icon collapses to nothing and the
    indicator silently disappears instead of the column overflowing visibly.
    The column width itself is set in App.vue. */

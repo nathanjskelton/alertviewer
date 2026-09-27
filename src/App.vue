@@ -48,10 +48,11 @@
   width: 100%;
 }
 .customize-table th:nth-child(1), .customize-table td:nth-child(1) { width: 40px; }
-/* Indicator column: must fit the status indicator plus the annotations and
-   jira icons side by side, or the icons get squashed out of sight. Worst case
-   is a flapping row (two status icons) carrying both: ~111px of content. */
-.customize-table th:nth-child(2), .customize-table td:nth-child(2) { width: 136px; }
+/* Indicator column: must fit the status indicator plus the annotations, notes
+   and jira icons side by side, or the icons get squashed out of sight. Worst
+   case is a flapping row (two status icons) carrying all three: ~141px of
+   content. */
+.customize-table th:nth-child(2), .customize-table td:nth-child(2) { width: 164px; }
 .customize-table th:nth-child(3), .customize-table td:nth-child(3) { width: 90px; }
 .customize-table th:nth-child(4), .customize-table td:nth-child(4) { width: 96px; }
 .customize-table th:nth-child(5), .customize-table td:nth-child(5) { width: 84px; }

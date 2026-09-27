@@ -14,7 +14,7 @@
       <v-icon>mdi-account</v-icon>
     </v-btn>    
     <v-btn tile @click="fetchData()" target="_blank" text>
-      Query
+      Refresh
       <v-icon>mdi-database-refresh</v-icon>
     </v-btn>    
   </v-app-bar>

@@ -19,7 +19,7 @@
     <app-bar :cortana_user=getUser() :cortana_role=getRole() />
     <default-view @alertManagerStatus="setAlertManagers" @alertIntervals="setAlertIntervals"
       :timeline_selection="timelineSelection" @closeTimeline="timelineSelection = null"
-      @alerts="setAlerts" @alert="setAlert" @banner="setBanner" @retention="setRetention" @status="setStatus" @lastIngest="setLastIngest" @user="setUser" @role="setRole" />
+      @alerts="setAlerts" @alert="setAlert" @banner="setBanner" @retention="setRetention" @status="setStatus" @version="setVersion" @lastIngest="setLastIngest" @user="setUser" @role="setRole" />
     
     <v-footer app class="ma-0 pa-0">
       <v-container fluid class="ma-0 pa-0">
@@ -31,8 +31,12 @@
       </v-row>
       <!-- Firing history over the zoom control's span, coloured by worst
            severity. The zoom only resizes this graph; scrubbing inside it still
-           drives the gantt. -->
-      <v-row dense class="flex-nowrap align-center">
+           drives the gantt.
+
+           Alerts page only: it is a graph of the alert list, it is fed by that page's
+           polling, and the gantt it scrubs is drawn there too. On the other pages
+           there is nothing behind it and nothing keeping it current. -->
+      <v-row v-if="onAlertsPage" dense class="flex-nowrap align-center">
         <v-col cols="auto" class="ma-0 pa-0">
         <alert-timeline-zoom v-model="timelineZoom" :retention-minutes="retentionMinutes" />
         </v-col>
@@ -42,11 +46,20 @@
       </v-row>
       <v-row dense >
         <v-col class="ma-0 pa-0">
+        <!-- Every part of this -- the status message, the age of the data, the
+             alertmanager health -- comes from the poll the alerts page runs, so off that
+             page it would only ever show how things stood when the page was left. Say
+             that instead. -->
         <v-card class="pa-0" height="30px" flat color="grey lighten-2"><v-card-text class="pt-1 ps-5">
+          <template v-if="onAlertsPage">
           {{ status }} &nbsp;&nbsp; Data is {{ lastIngest }} seconds old. <span style="padding-left: 20px;" v-for="item, key in alertManagerStatus">
             <v-icon color=red v-if="lastIngest != 'MANY' && item==false" class="mb-1">mdi-alert-circle</v-icon>
             <v-icon color=#339933 v-if="lastIngest != 'MANY' && item==true" class="mb-1">mdi-check-circle</v-icon>
-            <v-icon color=red v-if="lastIngest == 'MANY'" class="mb-1">mdi-help-circle</v-icon>  {{key}}</span></v-card-text></v-card>
+            <v-icon color=red v-if="lastIngest == 'MANY'" class="mb-1">mdi-help-circle</v-icon>  {{key}}</span>
+          </template>
+          <template v-else>
+          Polling paused<span v-if="version"> - version {{ version }}</span>
+          </template></v-card-text></v-card>
         </v-col>
       </v-row>
       <!--      
@@ -73,7 +86,8 @@
   import AlertTimelineZoom from '@/components/AlertTimelineZoom.vue'
   import { DEFAULT_RETENTION_MINUTES, nearestStop } from '@/components/timelineWindow'
   import axios from "axios";
-  import { ref } from 'vue'
+  import { computed, ref } from 'vue'
+  import { useRoute } from 'vue-router'
 
   import { getCurrentInstance } from 'vue'
 
@@ -91,6 +105,15 @@
   const banner = ref('');
   
   const alertManagerStatus = ref('');
+
+  //the build version, kept from the last poll so the footer can still name it once the
+  //alerts page and its polling have gone
+  const version = ref('');
+
+  //Every route here shares one path and differs only by name, so the name is what says
+  //which page is on screen. The alerts page is the only one that polls.
+  const route = useRoute();
+  const onAlertsPage = computed(() => route.name == 'Results');
 
   // The graph opens showing everything the backend still holds; the zoom
   // control narrows it from there. Both are minutes.
@@ -125,6 +148,10 @@
   
   function setStatus(x) {
     status.value = x;
+  }
+
+  function setVersion(x) {
+    if (x) { version.value = x; }
   }
 
   function setBanner(x) {

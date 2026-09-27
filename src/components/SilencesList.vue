@@ -19,7 +19,7 @@
       <v-icon>mdi-power-plug-off</v-icon>
     </v-btn>
     <v-btn tile @click="fetchData()" target="_blank" text>
-      Query
+      Refresh
       <v-icon>mdi-database-refresh</v-icon>
     </v-btn>  
   </v-app-bar>
@@ -171,23 +171,58 @@
     </v-card>
   </v-dialog>
 
+  <div class="silences-table" ref="tableWrap">
   <EasyDataTable
     :headers="headers"
-    :items="silences"
+    :items="rows"
     :loading="loading"
     
   >
+
+    <!-- pending and expired silences are listed too, so they need saying apart -->
+    <template #item-state="item">
+      <v-chip size="small" label variant="flat" class="text-white font-weight-medium"
+          :color="stateColour(item.state)">
+        <v-icon start :icon="stateIcon(item.state)"></v-icon>
+        {{ item.state }}
+      </v-chip>
+    </template>
+
+    <!-- what the silence actually matches, under its comment: lighter than the state
+         chip so the two do not fight for the eye. the table has no way to give a row a
+         cell that spans it, so the chips are laid out to the width of the whole table
+         and overflow the comment cell to the right. the slot around them is what keeps
+         the column from growing to fit -- see the styles. -->
+    <template #item-comment="item">
+      <div>
+        <div>{{ item.comment }}</div>
+        <div class="silence-matchers-slot">
+          <div class="silence-matchers" :style="matcherRowStyle">
+            <v-chip v-for="(matcher, i) in (item.matchers || [])" :key="i"
+                size="x-small" label variant="tonal" color="blue-grey" class="mr-1 mt-1">
+              {{ matcherText(matcher) }}
+            </v-chip>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template #item-timing="item">
+      <span :title="item.stamp">{{ item.timing }}</span>
+    </template>
 
     <template #item-actions="item">
  
       <table><tr><td style="padding: 5px">
         <v-btn icon dense size="x-small" @click="editSilence(item);"><v-icon>mdi-pencil</v-icon></v-btn>
       </td><td style="padding: 5px">
-        <v-btn icon dense size="x-small" @click="deleteSilence(item.id);"><v-icon>mdi-delete</v-icon></v-btn>
+        <!-- nothing left to expire on a silence that is already over -->
+        <v-btn v-if="item.state != 'expired'" icon dense size="x-small" @click="deleteSilence(item.id);"><v-icon>mdi-delete</v-icon></v-btn>
       </td></tr></table>
     </template>
 
   </EasyDataTable>
+  </div>
 </template>
 
 <script>
@@ -201,6 +236,8 @@
           cortana_role: String,
         },
         data() {
+            //the state column: just the chip, and the matcher row starts after it
+            const stateWidth = 110;
             return {
                 currentSilence: {
                     matchers: [
@@ -244,9 +281,22 @@
                 },
 
                 silences: [],
+                //the table's own width, watched so the matcher row can be laid out to it
+                tableWidth: 0,
+                stateWidth: stateWidth,
                 alertmanagers: [],
                 expanded: [],
                 headers: [
+                    {
+                    key: "state",
+                    text: "State",
+                    align: "left",
+                    sortable: true,
+                    value: "state",
+                    filterable: true,
+                    //just the chip: "expired" with its icon is the widest it gets
+                    width: stateWidth,
+                    },
                     {
                     key: "comment",
                     text: "Comment",
@@ -272,12 +322,14 @@
                     filterable: true,
                     },                    
                     {
-                    key: "hoursLeft",
-                    text: "Hours Left",
+                    key: "timing",
+                    text: "Timing",
                     align: "left",
-                    sortable: true,
-                    value: "hoursLeft",
-                    filterable: true,
+                    //the rows arrive grouped by state and ordered by time; sorting on this
+                    //column would only sort the wording
+                    sortable: false,
+                    value: "timing",
+                    filterable: false,
                     },
                     {
                     key: "actions",
@@ -293,6 +345,36 @@
             }
         },
         computed: {
+            //what the table shows: every silence the server returned, each carrying the
+            //state it is in and a line saying when it starts or when it went
+            rows() {
+                const now = Date.now();
+                return (this.silences || []).map(silence => {
+                    const state = this.stateOf(silence, now);
+                    const starts = this.stampMs(silence.startsAt);
+                    const ends = this.stampMs(silence.endsAt);
+                    const at = (state == "pending") ? starts : ends;
+                    return Object.assign({}, silence, {
+                        state: state,
+                        timing: this.timingText(state, starts, ends, now),
+                        //within a state, the nearest to now first: the next to end, the next
+                        //to start, the last to have gone
+                        order: (at == null) ? Number.MAX_SAFE_INTEGER : Math.abs(at - now),
+                        //the exact moment, on hover, since the line above is a rounded gap
+                        stamp: (at == null) ? "" : this.utcStamp(at)
+                    });
+                }).sort((a, b) => (this.stateRank(a.state) - this.stateRank(b.state)) || (a.order - b.order));
+            },
+            //the room left from the comment cell to the right edge of the table. null
+            //until the table has been measured, when the chips just wrap in their cell
+            matcherRowStyle() {
+                if (this.tableWidth == 0) { return null; }
+                //the state column sits before the comment, and the cells carry 5px padding.
+                //a little more comes off so the band cannot reach the right edge and put a
+                //scrollbar under the table
+                const span = this.tableWidth - this.stateWidth - 24;
+                return { width: Math.max(240, span) + "px" };
+            },
             //one message at a time, in the order the user would hit them
             outageProblem() {
                 if (this.outage.name == null || String(this.outage.name).trim() == "") {
@@ -333,8 +415,87 @@
             this.fetchData();
             }, 1000);
 
+            this.measureTable();
+            if (typeof ResizeObserver != "undefined") {
+                this.tableObserver = new ResizeObserver(() => this.measureTable());
+                this.tableObserver.observe(this.$refs.tableWrap);
+            } else {
+                window.addEventListener("resize", this.measureTable);
+            }
+        },
+        unmounted() {
+            if (this.tableObserver != null) {
+                this.tableObserver.disconnect();
+            } else {
+                window.removeEventListener("resize", this.measureTable);
+            }
         },
         methods: {
+            //active first, then what is coming, then what is over
+            stateRank(state) {
+                const rank = { active: 0, pending: 1, expired: 2 };
+                return (state in rank) ? rank[state] : 3;
+            },
+            stampMs(stamp) {
+                if (stamp == null || stamp == "") { return null; }
+                const ms = Date.parse(stamp);
+                return isNaN(ms) ? null : ms;
+            },
+            //the state alertmanager reported is only as fresh as the last ingest, so work
+            //it out from the window whenever the silence carries one
+            stateOf(silence, now) {
+                const starts = this.stampMs(silence.startsAt);
+                const ends = this.stampMs(silence.endsAt);
+                if (ends != null && ends <= now) { return "expired"; }
+                if (starts != null && starts > now) { return "pending"; }
+                if (starts != null && ends != null) { return "active"; }
+                return (silence.status && silence.status.state) ? silence.status.state : "active";
+            },
+            //a rounded gap, biggest two units that say something: "3d 4h", "2h 15m", "40m"
+            gapText(ms) {
+                const mins = Math.max(1, Math.round(Math.abs(ms) / 60000));
+                const days = Math.floor(mins / 1440);
+                const hours = Math.floor((mins % 1440) / 60);
+                if (days > 0) { return days + "d" + (hours > 0 ? " " + hours + "h" : ""); }
+                if (hours > 0) { return hours + "h" + (mins % 60 > 0 ? " " + (mins % 60) + "m" : ""); }
+                return mins + "m";
+            },
+            timingText(state, starts, ends, now) {
+                if (state == "pending") {
+                    return (starts == null) ? "starts later" : "starts in " + this.gapText(starts - now);
+                }
+                if (state == "expired") {
+                    return (ends == null) ? "expired" : "expired " + this.gapText(now - ends) + " ago";
+                }
+                return (ends == null) ? "" : this.gapText(ends - now) + " left";
+            },
+            //UTC, like every other time this tool shows
+            utcStamp(ms) {
+                return new Date(ms).toISOString().replace("T", " ").substring(0, 16) + " UTC";
+            },
+            measureTable() {
+                const wrap = this.$refs.tableWrap;
+                this.tableWidth = (wrap == null) ? 0 : wrap.clientWidth;
+            },
+            //how alertmanager itself writes a matcher: name, operator, value
+            matcherText(matcher) {
+                const regex = (matcher.isRegex == true);
+                const equal = (matcher.isEqual != false);
+                const op = regex ? (equal ? "=~" : "!~") : (equal ? "=" : "!=");
+                return (matcher.name || "") + op + (matcher.value || "");
+            },
+            //solid and full strength, with white text: a tonal chip in a pale colour
+            //washes out against the table
+            stateColour(state) {
+                if (state == "pending") { return "blue-darken-2"; }
+                if (state == "expired") { return "grey-darken-1"; }
+                return "green-darken-2";
+            },
+            stateIcon(state) {
+                if (state == "pending") { return "mdi-clock-outline"; }
+                if (state == "expired") { return "mdi-history"; }
+                return "mdi-sleep";
+            },
             handleError(error) {
               this.$emit("alert", error, "error");
 
@@ -529,3 +690,34 @@
         }
     }
 </script>
+
+<style scoped>
+  /* the table lays its columns out from what the cells hold, so a wide matcher row put
+     straight into the comment cell would stretch that column and push the rest of them
+     off the side. the slot is nothing wide, which is all the column is asked to fit,
+     while its contents keep their own width and overflow it. the height still counts,
+     so the table row grows to hold however many lines of chips there are. */
+  .silence-matchers-slot {
+    width: 0;
+  }
+  .silence-matchers {
+    display: flex;
+    flex-wrap: wrap;
+    /* until the table has been measured: one line rather than a stack, since the slot
+       around it is nothing wide */
+    width: max-content;
+    /* the cells to the right are positioned and paint a background of their own, which
+       would otherwise cover whatever runs under them */
+    position: relative;
+    z-index: 1;
+  }
+  /* a single matcher longer than the row wraps rather than running off it */
+  .silence-matchers :deep(.v-chip) {
+    max-width: 100%;
+  }
+  /* the fields on the first line, with the matchers spanning underneath them */
+  .silences-table :deep(td) {
+    vertical-align: top;
+    padding-top: 8px;
+  }
+</style>
