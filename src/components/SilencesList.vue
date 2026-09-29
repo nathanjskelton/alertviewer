@@ -190,9 +190,10 @@
 
     <!-- what the silence actually matches, under its comment: lighter than the state
          chip so the two do not fight for the eye. the table has no way to give a row a
-         cell that spans it, so the chips are laid out to the width of the whole table
-         and overflow the comment cell to the right. the slot around them is what keeps
-         the column from growing to fit -- see the styles. -->
+         cell that spans it, so the chips are laid out to the width of the fields and
+         overflow the comment cell to the right, stopping short of the buttons in the
+         last column. the slot around them is what keeps the column from growing to
+         fit -- see the styles. -->
     <template #item-comment="item">
       <div>
         <div>{{ item.comment }}</div>
@@ -238,6 +239,9 @@
         data() {
             //the state column: just the chip, and the matcher row starts after it
             const stateWidth = 110;
+            //the last column: the edit and expire buttons, and the matcher row stops
+            //short of it rather than running underneath them
+            const actionsWidth = 80;
             return {
                 currentSilence: {
                     matchers: [
@@ -284,6 +288,7 @@
                 //the table's own width, watched so the matcher row can be laid out to it
                 tableWidth: 0,
                 stateWidth: stateWidth,
+                actionsWidth: actionsWidth,
                 alertmanagers: [],
                 expanded: [],
                 headers: [
@@ -337,7 +342,9 @@
                     align: "start",
                     sortable: false,
                     value: "actions",
-                    filterable: false
+                    filterable: false,
+                    //held to a known width so the matcher row can be kept out of it
+                    width: actionsWidth
                     }           
                 ],
                 loading: true,
@@ -365,14 +372,15 @@
                     });
                 }).sort((a, b) => (this.stateRank(a.state) - this.stateRank(b.state)) || (a.order - b.order));
             },
-            //the room left from the comment cell to the right edge of the table. null
-            //until the table has been measured, when the chips just wrap in their cell
+            //the room left from the comment cell to the actions column. null until the
+            //table has been measured, when the chips just wrap in their cell
             matcherRowStyle() {
                 if (this.tableWidth == 0) { return null; }
-                //the state column sits before the comment, and the cells carry 5px padding.
-                //a little more comes off so the band cannot reach the right edge and put a
-                //scrollbar under the table
-                const span = this.tableWidth - this.stateWidth - 24;
+                //the state column sits before the comment and the actions column after the
+                //last of the fields, and the cells carry 5px padding. a little more comes
+                //off so the band cannot reach the right edge and put a scrollbar under the
+                //table
+                const span = this.tableWidth - this.stateWidth - this.actionsWidth - 24;
                 return { width: Math.max(240, span) + "px" };
             },
             //one message at a time, in the order the user would hit them

@@ -805,16 +805,18 @@ export default {
       return tags;
     },
     getUserNotes(item) {
-      // Notes somebody wrote, as opposed to bookkeeping -- both are noise in a list
-      // meant to surface what an operator had to say about the alert. Two sources:
-      // the ingester's running commentary on every status change, written under the
-      // "System" user, and the jira trail. The jira notes are written under the
-      // acting user, so only their "Jira: " prefix tells them apart -- every note
-      // the link and rebuild endpoints add starts with it (create adds none), while
-      // a note typed in the UI is always sent prefixed "Note: ".
+      // Notes somebody typed, as opposed to bookkeeping -- the ingester's commentary on
+      // every status change, written under the "System" user, the jira trail, and the
+      // line a mark or a silence leaves behind are all noise in a list meant to surface
+      // what an operator had to say about the alert.
+      //
+      // The note button is the only thing that has ever posted a note of its own, and it
+      // has always sent it prefixed "Note: ", which nothing written by the server starts
+      // with. So the prefix is what says a note was typed, and it says it for every note
+      // already in the database as well as the ones written from here on.
       let notes = (item && item.notes) || [];
-      return notes.filter(n => n != null && n.user != "System"
-          && !/^jira:/i.test(String(n.message == null ? "" : n.message).trimStart()));
+      return notes.filter(n => n != null
+          && /^note:\s/i.test(String(n.message == null ? "" : n.message).trimStart()));
     },
     getLabelColor(label) {
       // Deterministically pick a color from a palette based on the key name,
@@ -1176,8 +1178,12 @@ export default {
         });
     },
     saveNote() {
+      // read off the dialog now: it has already been closed, and the next note typed
+      // overwrites these
+      const id = this.note.id;
+      const message = this.note.prefix + ": " + this.note.message;
       axios
-        .post(this.baseUrl + "note?id=" + this.note.id, this.note.prefix + ": " + this.note.message, {
+        .post(this.baseUrl + "note?id=" + id, message, {
           headers: {
             "Content-Type": "text/plain",
             "CORTANA-TOKEN": this.cortana_token
@@ -1186,10 +1192,35 @@ export default {
         //eslint-disable-next-line no-unused-vars
         .then(response => {
           this.onSuccess(response);
+          this.addLocalNote(id, message);
         })
         .catch(error => {
           this.handleError(error);
         });
+    },
+    // A note just accepted by the backend, put on the copy of the record on screen as
+    // well. Nothing refetches after a note, so without this the note icon -- and the
+    // list it opens -- would not know about the note until something else did, which
+    // reads as the note having gone nowhere. A refetch would show it, but it also
+    // collapses every open group, which is a lot of the screen to lose over one note.
+    addLocalNote(id, message) {
+      const note = {
+        // the backend dates a note in UTC and jackson writes it without a zone, which
+        // is what noteTime() and the note list expect to be handed
+        timestamp: new Date().toISOString().replace(/Z$/, ""),
+        user: this.cortana_user,
+        message: message
+      };
+      Object.keys(this.info).forEach(key => {
+        const list = (this.info[key] || {}).list || [];
+        list.forEach(item => {
+          if (item != null && item.id == id) {
+            if (!Array.isArray(item.notes)) { item.notes = []; }
+            // the backend sends a record's notes newest first
+            item.notes.unshift(note);
+          }
+        });
+      });
     },
     newMatcher() {
       this.currentSilence.matchers.push(
