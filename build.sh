@@ -1,16 +1,18 @@
 #!/bin/bash
 
-set -a
-source "$(dirname "$0")/.env"
-set +a
+set -e
 
-if [ -z "$IMAGE" ] || [ -z "$CONTAINER_CMD" ]; then
-    echo "IMAGE or CONTAINER_CMD is not set - check .env" >&2
-    exit 1
-fi
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-VER=`mvn help:evaluate -Dexpression=project.version -q -DforceStdout`
-echo "*** Building $IMAGE version $VER ***"
-rm -rf target
-mvn clean install
-$CONTAINER_CMD build --build-arg VERSION=$VER -t $IMAGE:$VER .
+for project in alertviewer-backend alertviewer-ui; do
+    echo ""
+    echo "=== $project: build ==="
+    (cd "$ROOT/$project" && ./build.sh)
+
+    echo ""
+    echo "=== $project: push ==="
+    (cd "$ROOT/$project" && ./push-cy.sh)
+done
+
+echo ""
+echo "=== All projects built and pushed ==="
