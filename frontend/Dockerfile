@@ -7,6 +7,10 @@ WORKDIR /app
 # Copy all files from current directory to working dir in image
 COPY . .
 
+# release version from ../version.env, passed in by build.sh
+ARG APP_VERSION
+ENV APP_VERSION=$APP_VERSION
+
 # install node modules and build assets
 RUN npm install && npm run build
 

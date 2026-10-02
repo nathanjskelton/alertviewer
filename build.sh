@@ -4,7 +4,7 @@ set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-for project in alertviewer-backend alertviewer-ui; do
+for project in backend frontend; do
     echo ""
     echo "=== $project: build ==="
     (cd "$ROOT/$project" && ./build.sh)
