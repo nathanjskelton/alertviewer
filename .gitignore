@@ -22,3 +22,15 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+
+#backend
+target/
+*.iml
+/.idea/
+/.vscode/
+
+application.properties
+
+*.log
+*.log.*

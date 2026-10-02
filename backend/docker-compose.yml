@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  aalertviewer-backend:
+    image: alertviewer-backend
+    ports: 
+      - 8085:8085
+    volumes:
+      - /etc/pki/tls/certs:/certs
+
