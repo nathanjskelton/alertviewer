@@ -6,3 +6,7 @@ vscode/
 
 application.properties
 .env
+
+# the log the app writes when it is run or tested from the checkout, rotations included
+*.log
+*.log.*
